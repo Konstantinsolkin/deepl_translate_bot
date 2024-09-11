@@ -7,8 +7,8 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import  ContentType, LabeledPrice
 from aiogram.filters import Command
-from wallet import init_db, get_balance, update_balance, get_wallet_keyboard, send_invoice
-from keyboards import get_language_keyboard, get_approval_keyboard, main_menu
+from wallet import init_db, get_balance, update_balance, send_invoice
+from keyboards import get_language_keyboard, get_approval_keyboard, main_menu, get_wallet_keyboard
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -19,6 +19,8 @@ BOT_TOKEN = os.getenv("TG")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
+
+print(DEEPL_API_KEY, PAYMENT_TOKEN, BOT_TOKEN)
 
 class PDFTranslationStates(StatesGroup):
     waiting_for_pdf = State()
@@ -31,21 +33,21 @@ async def send_welcome(message: types.Message):
     await message.answer("Добро пожаловать! Выберите действие:", reply_markup=main_menu())
 
 
-@dp.message(F.text == "Отправить файл")
+@dp.message(F.text == "Отправить файл на перевод")
 async def start_translation(message: types.Message, state: FSMContext):
     await message.answer("Пожалуйста, загрузите PDF-документ, который вы хотите перевести.")
     await state.set_state(PDFTranslationStates.waiting_for_pdf)
 
-@dp.message(F.text == "Кошелек")
+@dp.message(Command("balance"))
 async def show_wallet(message: types.Message):
     user_id = message.from_user.id
     balance = get_balance(user_id)
-    await message.answer(f"Ваш баланс: {balance:.2f} RUB", reply_markup=get_wallet_keyboard())
+    await message.answer(f"Ваш баланс: {balance:.2f} RUB\n\nВыберите сумму для пополнения кошелька", reply_markup=get_wallet_keyboard())
 
-@dp.callback_query(F.data == "top_up_wallet")
+@dp.callback_query(F.data.startswith("top_up_wallet_"))
 async def top_up_wallet(callback_query: types.CallbackQuery):
-    price_rubles = 100  # Пример суммы для пополнения
-    await send_invoice(bot, callback_query.message.chat.id, price_rubles)
+    amount = int(callback_query.data.split("_")[-1])
+    await send_invoice(bot, callback_query.message.chat.id, amount)
 
 @dp.pre_checkout_query()
 async def process_pre_checkout_query(pre_checkout_query: types.PreCheckoutQuery):
@@ -58,6 +60,30 @@ async def process_successful_payment(message: types.Message):
         amount = message.successful_payment.total_amount / 100  # Конвертация в рубли
         update_balance(user_id, amount)
         await message.answer(f"Ваш кошелек пополнен на {amount:.2f} RUB.")
+
+@dp.message(PDFTranslationStates.waiting_for_payment, F.text == "Подтвердить")
+async def approve_payment(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    user_id = message.from_user.id
+    price_rubles = data.get('price_rubles')
+
+    # Проверяем, достаточно ли средств на балансе
+    balance = get_balance(user_id)
+    if balance >= price_rubles:
+        # Списание средств
+        update_balance(user_id, -price_rubles)
+        await message.answer(f"Средства в размере {price_rubles:.2f} RUB списаны с вашего кошелька.")
+
+        await message.answer("Выберите язык для перевода:", reply_markup=get_language_keyboard())
+        await state.set_state(PDFTranslationStates.waiting_for_language)
+    else:
+        await message.answer(f"Недостаточно средств на балансе. Ваш баланс: {balance:.2f} RUB.")
+
+@dp.message(PDFTranslationStates.waiting_for_payment, F.text == "Отмена")
+async def cancel_payment(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Операция отменена. Пожалуйста, загрузите новый документ для перевода.")
+    await state.set_state(PDFTranslationStates.waiting_for_pdf)
 
 
 @dp.message(PDFTranslationStates.waiting_for_pdf)
@@ -90,7 +116,7 @@ async def handle_pdf(message: types.Message, state: FSMContext):
                 )
                 await state.set_state(PDFTranslationStates.waiting_for_payment)
             else:
-                await message.answer(f"Недостаточно средств на балансе. Ваш баланс: {balance:.2f} RUB.")
+                await message.answer(f"Недостаточно средств на балансе. Ваш баланс: {balance:.2f} RUB.", reply_markup=get_wallet_keyboard())
         else:
             await message.answer("Пожалуйста, загрузите PDF или DOCX файл.")
 
@@ -211,5 +237,6 @@ def convert_to_rubles(price_euros):
     return price_euros * conversion_rate
 
 if __name__ == '__main__':
+    import asyncio
     init_db()
-    dp.run_polling(bot)
+    asyncio.run(dp.start_polling(bot))

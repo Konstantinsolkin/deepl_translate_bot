@@ -35,15 +35,9 @@ def update_balance(user_id, amount):
     conn.commit()
     conn.close()
 
-# Кнопка пополнения баланса
-def get_wallet_keyboard():
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Пополнить кошелек", callback_data="top_up_wallet")]
-    ])
-    return keyboard
 
 # Генерация инвойса
-async def send_invoice(bot, chat_id, price_rubles):
+async def send_invoice(bot, chat_id, price_rubles: float):
     prices = [LabeledPrice(label="Пополнение кошелька", amount=int(price_rubles * 100))]
     await bot.send_invoice(
         chat_id,
