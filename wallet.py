@@ -1,10 +1,12 @@
 import sqlite3
-from aiogram import types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice
+from aiogram.types import LabeledPrice
+import os
+from dotenv import load_dotenv
 
-PAYMENT_TOKEN = "381764678:TEST:94467"
+load_dotenv()
 
-# Инициализация базы данных
+PAYMENT_TOKEN = os.getenv("PAYMENT_TOKEN")
+
 def init_db():
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
@@ -17,7 +19,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-# Получение текущего баланса
 def get_balance(user_id):
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
@@ -26,7 +27,6 @@ def get_balance(user_id):
     conn.close()
     return result[0] if result else 0
 
-# Обновление баланса
 def update_balance(user_id, amount):
     conn = sqlite3.connect('wallet.db')
     cursor = conn.cursor()
@@ -35,14 +35,12 @@ def update_balance(user_id, amount):
     conn.commit()
     conn.close()
 
-
-# Генерация инвойса
 async def send_invoice(bot, chat_id, price_rubles: float):
     prices = [LabeledPrice(label="Пополнение кошелька", amount=int(price_rubles * 100))]
     await bot.send_invoice(
         chat_id,
         title="Пополнение кошелька",
-        description="Пополнение на сумму: {:.2f} RUB".format(price_rubles),
+        description=f"Пополнение на сумму: {price_rubles:.2f} RUB",
         provider_token=PAYMENT_TOKEN,
         currency="RUB",
         prices=prices,

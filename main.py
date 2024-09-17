@@ -1,11 +1,11 @@
-import os
-import deepl
 import fitz
+import deepl
+import os
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import  ContentType, LabeledPrice
+from aiogram.types import ContentType
 from aiogram.filters import Command
 from wallet import init_db, get_balance, update_balance, send_invoice
 from keyboards import get_language_keyboard, get_approval_keyboard, main_menu, get_wallet_keyboard
@@ -13,41 +13,36 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DEEPL_API_KEY = os.getenv("DEEPL")
-PAYMENT_TOKEN = os.getenv("PAYMENT_TOKEN")
 BOT_TOKEN = os.getenv("TG")
-
+DEEPL_API_KEY = os.getenv("DEEPL")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
-
-print(DEEPL_API_KEY, PAYMENT_TOKEN, BOT_TOKEN)
 
 class PDFTranslationStates(StatesGroup):
     waiting_for_pdf = State()
     waiting_for_language = State()
     waiting_for_payment = State()
 
-
 @dp.message(Command("start"))
 async def send_welcome(message: types.Message):
     await message.answer("Добро пожаловать! Выберите действие:", reply_markup=main_menu())
 
-
 @dp.message(F.text == "Отправить файл на перевод")
-async def start_translation(message: types.Message, state: FSMContext):
-    await message.answer("Пожалуйста, загрузите PDF-документ, который вы хотите перевести.")
+async def prompt_for_file(message: types.Message, state: FSMContext):
+    await message.answer("Пожалуйста, отправьте PDF или DOCX файл для перевода.")
     await state.set_state(PDFTranslationStates.waiting_for_pdf)
 
 @dp.message(Command("balance"))
 async def show_wallet(message: types.Message):
     user_id = message.from_user.id
     balance = get_balance(user_id)
-    await message.answer(f"Ваш баланс: {balance:.2f} RUB\n\nВыберите сумму для пополнения кошелька", reply_markup=get_wallet_keyboard())
+    await message.answer(f"Ваш баланс: {balance:.2f} RUB\n\nВыберите сумму для пополнения кошелька:", reply_markup=get_wallet_keyboard())
 
 @dp.callback_query(F.data.startswith("top_up_wallet_"))
 async def top_up_wallet(callback_query: types.CallbackQuery):
     amount = int(callback_query.data.split("_")[-1])
-    await send_invoice(bot, callback_query.message.chat.id, amount)
+    await send_invoice(bot, callback_query.from_user.id, amount)
+    await callback_query.answer()
 
 @dp.pre_checkout_query()
 async def process_pre_checkout_query(pre_checkout_query: types.PreCheckoutQuery):
@@ -57,7 +52,7 @@ async def process_pre_checkout_query(pre_checkout_query: types.PreCheckoutQuery)
 async def process_successful_payment(message: types.Message):
     if message.successful_payment.invoice_payload == "wallet_funding_payload":
         user_id = message.from_user.id
-        amount = message.successful_payment.total_amount / 100  # Конвертация в рубли
+        amount = message.successful_payment.total_amount / 100
         update_balance(user_id, amount)
         await message.answer(f"Ваш кошелек пополнен на {amount:.2f} RUB.")
 
@@ -66,14 +61,12 @@ async def approve_payment(message: types.Message, state: FSMContext):
     data = await state.get_data()
     user_id = message.from_user.id
     price_rubles = data.get('price_rubles')
+    character_count = data.get('character_count')
 
-    # Проверяем, достаточно ли средств на балансе
     balance = get_balance(user_id)
     if balance >= price_rubles:
-        # Списание средств
-        update_balance(user_id, -price_rubles)
-        await message.answer(f"Средства в размере {price_rubles:.2f} RUB списаны с вашего кошелька.")
-
+        await message.answer(f"Стоимость перевода: {price_rubles:.2f} RUB.")
+        await message.answer(f"Количество знаков в документе: {character_count}")
         await message.answer("Выберите язык для перевода:", reply_markup=get_language_keyboard())
         await state.set_state(PDFTranslationStates.waiting_for_language)
     else:
@@ -84,6 +77,7 @@ async def cancel_payment(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Операция отменена. Пожалуйста, загрузите новый документ для перевода.")
     await state.set_state(PDFTranslationStates.waiting_for_pdf)
+
 
 
 @dp.message(PDFTranslationStates.waiting_for_pdf)
@@ -109,9 +103,12 @@ async def handle_pdf(message: types.Message, state: FSMContext):
             user_id = message.from_user.id
             balance = get_balance(user_id)
 
+            await message.answer(f"Количество знаков в документе: {character_count}\n"
+                                 f"Стоимость перевода: {price_rubles:.2f} RUB")
+
             if balance >= price_rubles:
                 await message.answer(
-                    f"Стоимость перевода: {price_rubles:.2f} RUB. Подтвердите списание средств с вашего кошелька.",
+                    f"Подтвердите списание средств с вашего кошелька.",
                     reply_markup=get_approval_keyboard()
                 )
                 await state.set_state(PDFTranslationStates.waiting_for_payment)
@@ -120,19 +117,24 @@ async def handle_pdf(message: types.Message, state: FSMContext):
         else:
             await message.answer("Пожалуйста, загрузите PDF или DOCX файл.")
 
-
 @dp.callback_query(PDFTranslationStates.waiting_for_payment, F.data == "approve_payment")
 async def approve_payment(callback_query: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     user_id = callback_query.from_user.id
     price_rubles = data.get('price_rubles')
+    character_count = data.get('character_count')
 
-    # Списание средств
+    await callback_query.message.answer(f"Количество знаков в документе: {character_count}\n"
+                                        f"Стоимость перевода: {price_rubles:.2f} RUB")
+
     update_balance(user_id, -price_rubles)
     await callback_query.message.answer(f"Средства в размере {price_rubles:.2f} RUB списаны с вашего кошелька.")
 
     await callback_query.message.answer("Выберите язык для перевода:", reply_markup=get_language_keyboard())
     await state.set_state(PDFTranslationStates.waiting_for_language)
+
+
+
 
 @dp.callback_query(PDFTranslationStates.waiting_for_payment, F.data == "cancel_payment")
 async def cancel_payment(callback_query: types.CallbackQuery, state: FSMContext):
@@ -153,22 +155,14 @@ async def process_successful_payment(message: types.Message, state: FSMContext):
     await state.set_state(PDFTranslationStates.waiting_for_language)
 
 
+
 @dp.callback_query(PDFTranslationStates.waiting_for_language)
 async def handle_language_selection(callback_query: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    if data.get('payment_made', False):
-        await callback_query.message.answer("Пожалуйста, сначала оплатите перевод.")
-        return
-
-    if callback_query.data == 'cancel':
-        await state.clear()
-        await callback_query.message.answer(
-            "Операция отменена. Пожалуйста, загрузите новый PDF-документ, если хотите попробовать снова.")
-        await state.set_state(PDFTranslationStates.waiting_for_pdf)
-        return
-
     selected_language = callback_query.data
     pdf_filename = data.get("pdf_filename")
+    price_rubles = data.get('price_rubles')
+    user_id = callback_query.from_user.id
 
     if not pdf_filename or not os.path.exists(pdf_filename):
         await callback_query.message.answer("Не удалось найти PDF-файл. Пожалуйста, загрузите документ снова.")
@@ -188,31 +182,25 @@ async def handle_language_selection(callback_query: types.CallbackQuery, state: 
                 target_lang=selected_language
             )
 
+        update_balance(user_id, -price_rubles)
+        await callback_query.message.answer(f"Средства в размере {price_rubles:.2f} RUB списаны с вашего кошелька.")
+
+        await bot.send_document(callback_query.message.chat.id, types.FSInputFile(translated_filename))
+        await callback_query.message.answer("Ваш документ был переведен и отправлен вам.")
+
     except deepl.DeepLException as deepl_error:
         await callback_query.message.answer(f"Ошибка во время перевода: {deepl_error}")
         return
-
     except Exception as general_error:
         await callback_query.message.answer(f"Неожиданная ошибка: {general_error}")
         return
-
-    if os.path.exists(translated_filename):
+    finally:
         try:
-            await bot.send_document(callback_query.message.chat.id, types.FSInputFile(translated_filename))
-        except Exception as send_error:
-            await callback_query.message.answer(f"Ошибка при отправке переведенного документа: {send_error}")
-    else:
-        await callback_query.message.answer("Перевод не удался. Переведенный файл не был создан.")
+            os.remove(pdf_filename)
+            os.remove(translated_filename)
+        except Exception as cleanup_error:
+            await callback_query.message.answer(f"Ошибка при удалении временных файлов: {cleanup_error}")
 
-    try:
-        os.remove(pdf_filename)
-        os.remove(translated_filename)
-    except Exception as cleanup_error:
-        await callback_query.message.answer(f"Ошибка при удалении временных файлов: {cleanup_error}")
-
-    await callback_query.message.answer("Ваш документ был переведен и отправлен вам.")
-
-    # Reset state to accept a new document
     await state.clear()
     await callback_query.message.answer("Пожалуйста, загрузите новый документ для перевода.")
     await state.set_state(PDFTranslationStates.waiting_for_pdf)
